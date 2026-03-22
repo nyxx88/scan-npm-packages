@@ -54,10 +54,17 @@ readonly DEBUG_LEVEL_3=3     # Very verbose debug info
 DEBUG="${DEBUG:-0}"          # Default to no debug output
 
 # HEADLESS mode
-# - true: Outputs CSV formatted results that can be piped to a file
+# - true: Outputs formatted results (CSV or JSON) that can be piped to a file
 # - false: Outputs a summary of scan results in human readable form
 HEADLESS="${HEADLESS:-true}"
 readonly HEADLESS
+
+# OUTPUT_FORMAT (only used when HEADLESS=true)
+# - csv: CSV formatted output (default for backward compatibility)
+# - jsonl: JSON Lines format (one JSON object per line)
+# - json-array: Single JSON array of all flagged packages
+# - json-structured: Structured JSON with metadata and per-project breakdown
+OUTPUT_FORMAT="${OUTPUT_FORMAT:-csv}"
 
 # Time constants
 readonly SECONDS_PER_HOUR=3600
@@ -130,22 +137,25 @@ debug() {
 # ------------------------------------------------------------------------------
 usage() {
   cat <<EOF
-Usage: ${SCRIPT_NAME} [SEARCH_DIR] [HOURS]
+Usage: ${SCRIPT_NAME} [-o FORMAT] [SEARCH_DIR] [HOURS]
 
 Arguments:
+  -o FORMAT    Output format when HEADLESS=true (default: csv)
+               Options: csv, jsonl, json-array, json-structured
   SEARCH_DIR   Root directory to search (default: current directory)
   HOURS        Age threshold in hours (default: 24)
                Packages published within this timeframe will be flagged
 
 Examples:
-  ${SCRIPT_NAME}                      # Current dir, 24h
-  ${SCRIPT_NAME} ~/projects           # ~/projects, 24h
-  ${SCRIPT_NAME} ~/projects 48        # ~/projects, 48h
+  ${SCRIPT_NAME}                              # Current dir, 24h, CSV output
+  ${SCRIPT_NAME} ~/projects                   # ~/projects, 24h, CSV output
+  ${SCRIPT_NAME} -o jsonl ~/projects 48       # ~/projects, 48h, JSONL output
+  ${SCRIPT_NAME} -o json-structured . 24      # Current dir, 24h, structured JSON
 
 Environment Variables:
-  HEADLESS    Set to "true" (default) for CSV output
-              Useful for automated/headless scanning
-              Example: HEADLESS=true ${SCRIPT_NAME} ~/projects 24
+  HEADLESS    Set to "true" (default) for formatted output (CSV/JSON)
+              Set to "false" for human-readable summary
+              Example: HEADLESS=false ${SCRIPT_NAME} ~/projects 24
 
   DEBUG       Set debug level (0=off, 1=basic, 2=verbose, 3=very verbose)
               Debug output goes to stderr and can be redirected to a file
@@ -381,11 +391,13 @@ scan_project_packages() {
   local package_flagged_count=0
   local project_package_count=0
 
-  # "flagged_list" will contain a string of newline separated packages that have been flagged for review. A newline separates multiple packages:
+  # "flagged_list" will contain pipe-delimited strings of packages that have been flagged for review.
+  # Format: "package@version|type|publish_date|age_hours"
+  # Multiple packages are separated by newlines:
   # - easy for "grep -c" to count
   # - works well with "while read -r line" loops
-  # - already output format ready
-  # - no special escaping in case package name contains uncommon characters (e.g. hyphens, dots, etc.)
+  # - already output format ready (just needs parsing)
+  # - no special escaping needed for package names with uncommon characters
   # Each discovered "package-lock.json" will have its own "flagged_list" entry in the array "project_flagged_packages"
   local flagged_list=""
 
@@ -464,17 +476,14 @@ scan_project_packages() {
 
       # If package is published within threshold
       if [[ "${age_hours}" -lt "${age_threshold_hours}" ]]; then
-        if [[ "${HEADLESS}" == "true" ]]; then
-          echo "${lockfile_path},${pkg}@${version},${is_direct},${publish_date},${age_hours}"
-        fi
-
         ((package_flagged_count += 1))
 
-        # Add to flagged list for this project
+        # Add to flagged list for this project (pipe-delimited format)
+        local flagged_entry="${pkg}@${version}|${is_direct}|${publish_date}|${age_hours}"
         if [[ -z "${flagged_list}" ]]; then
-          flagged_list="${pkg}@${version}"
+          flagged_list="${flagged_entry}"
         else
-          flagged_list="${flagged_list}"$'\n'"${pkg}@${version}"
+          flagged_list="${flagged_list}"$'\n'"${flagged_entry}"
         fi
       fi
     fi
@@ -633,6 +642,242 @@ scan_projects() {
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
+# Iterate through all flagged packages and call a callback function for each
+# Usage: iterate_flagged_packages <callback_function>
+# Callback signature: callback <project_index> <pkg_version> <dep_type> <pub_date> <age_hours>
+# ------------------------------------------------------------------------------
+iterate_flagged_packages() {
+  local callback="${1}"
+
+  debug "${DEBUG_LEVEL_2}" "${FUNCNAME[0]}:$LINENO" "Iterating flagged packages with callback: ${callback}"
+
+  # Iterate through all projects
+  for i in $(seq 0 $((total_projects - 1))); do
+    local flagged="${project_flagged_packages[i]}"
+
+    # Skip projects with no flagged packages
+    if [[ -z "${flagged}" ]]; then
+      continue
+    fi
+
+    # Parse each pipe-delimited line and call the callback
+    while IFS='|' read -r pkg_version dep_type pub_date age_hrs; do
+      # Call the callback with parsed fields
+      "${callback}" "${i}" "${pkg_version}" "${dep_type}" "${pub_date}" "${age_hrs}"
+    done <<< "${flagged}"
+  done
+}
+
+# ------------------------------------------------------------------------------
+# Output callback for CSV format
+# Usage: _csv_callback <project_index> <pkg_version> <dep_type> <pub_date> <age_hours>
+# ------------------------------------------------------------------------------
+_csv_callback() {
+  local proj_idx="${1}"
+  local pkg_version="${2}"
+  local dep_type="${3}"
+  local pub_date="${4}"
+  local age_hrs="${5}"
+
+  local lockfile_path="${project_paths[proj_idx]}/package-lock.json"
+  local project_name="${project_names[proj_idx]}"
+  echo "${lockfile_path},${project_name},${pkg_version},${dep_type},${pub_date},${age_hrs}"
+}
+
+# ------------------------------------------------------------------------------
+# Output all flagged packages in CSV format
+# Format: lockfile_path,project_name,package@version,type,publish_date,age_hours
+# ------------------------------------------------------------------------------
+output_csv() {
+  debug "${DEBUG_LEVEL_1}" "${FUNCNAME[0]}:$LINENO" "Outputting CSV format"
+  iterate_flagged_packages _csv_callback
+}
+
+# ------------------------------------------------------------------------------
+# Output callback for JSONL format (JSON Lines - one object per line)
+# Usage: _jsonl_callback <project_index> <pkg_version> <dep_type> <pub_date> <age_hours>
+# ------------------------------------------------------------------------------
+_jsonl_callback() {
+  local proj_idx="${1}"
+  local pkg_version="${2}"
+  local dep_type="${3}"
+  local pub_date="${4}"
+  local age_hrs="${5}"
+
+  local lockfile_path="${project_paths[proj_idx]}/package-lock.json"
+  local project_name="${project_names[proj_idx]}"
+
+  # Output single JSON object per line (properly escaped, monochrome for automation)
+  jq -M -n \
+    --arg lockfile "${lockfile_path}" \
+    --arg project "${project_name}" \
+    --arg package "${pkg_version}" \
+    --arg type "${dep_type}" \
+    --arg published "${pub_date}" \
+    --argjson age_hours "${age_hrs}" \
+    '{lockfile: $lockfile, project: $project, package: $package, type: $type, published: $published, age_hours: $age_hours}'
+}
+
+# ------------------------------------------------------------------------------
+# Output all flagged packages in JSONL format (one JSON object per line)
+# ------------------------------------------------------------------------------
+output_jsonl() {
+  debug "${DEBUG_LEVEL_1}" "${FUNCNAME[0]}:$LINENO" "Outputting JSONL format"
+  iterate_flagged_packages _jsonl_callback
+}
+
+# ------------------------------------------------------------------------------
+# Output all flagged packages in JSON array format
+# Format: Single JSON array containing all flagged packages
+# ------------------------------------------------------------------------------
+output_json_array() {
+  debug "${DEBUG_LEVEL_1}" "${FUNCNAME[0]}:$LINENO" "Outputting JSON array format"
+
+  local first_item=true
+  echo "["
+
+  # Define inline callback for array items
+  _json_array_callback() {
+    local proj_idx="${1}"
+    local pkg_version="${2}"
+    local dep_type="${3}"
+    local pub_date="${4}"
+    local age_hrs="${5}"
+
+    local lockfile_path="${project_paths[proj_idx]}/package-lock.json"
+    local project_name="${project_names[proj_idx]}"
+
+    # Add comma before all items except the first
+    if [[ "${first_item}" == "true" ]]; then
+      first_item=false
+    else
+      echo ","
+    fi
+
+    # Output JSON object (properly indented, monochrome for automation compatibility)
+    jq -M -n \
+      --arg lockfile "${lockfile_path}" \
+      --arg project "${project_name}" \
+      --arg package "${pkg_version}" \
+      --arg type "${dep_type}" \
+      --arg published "${pub_date}" \
+      --argjson age_hours "${age_hrs}" \
+      '{lockfile: $lockfile, project: $project, package: $package, type: $type, published: $published, age_hours: $age_hours}' | \
+      sed 's/^/  /'
+  }
+
+  iterate_flagged_packages _json_array_callback
+  echo "]"
+}
+
+# ------------------------------------------------------------------------------
+# Output structured JSON with metadata and per-project breakdown
+# Format: Complete scan results with summary statistics and project details
+# ------------------------------------------------------------------------------
+output_json_structured() {
+  debug "${DEBUG_LEVEL_1}" "${FUNCNAME[0]}:$LINENO" "Outputting structured JSON format"
+
+  # Build projects array with flagged packages
+  local projects_json="["
+  local first_project=true
+
+  for i in $(seq 0 $((total_projects - 1))); do
+    local project_name="${project_names[i]}"
+    local project_path="${project_paths[i]}"
+    local total_pkgs="${project_total_packages[i]}"
+    local flagged="${project_flagged_packages[i]}"
+
+    # Count flagged packages for this project
+    local flagged_count=0
+    if [[ -n "${flagged}" ]]; then
+      flagged_count=$(echo "${flagged}" | grep -c '^')
+    fi
+
+    # Add comma between projects
+    if [[ "${first_project}" == "true" ]]; then
+      first_project=false
+    else
+      projects_json="${projects_json},"
+    fi
+
+    # Build flagged_packages array for this project
+    local flagged_packages_json="["
+    if [[ -n "${flagged}" ]]; then
+      local first_pkg=true
+      while IFS='|' read -r pkg_version dep_type pub_date age_hrs; do
+        if [[ "${first_pkg}" == "true" ]]; then
+          first_pkg=false
+        else
+          flagged_packages_json="${flagged_packages_json},"
+        fi
+
+        # Add package object
+        local pkg_obj
+        pkg_obj=$(jq -n \
+          --arg package "${pkg_version}" \
+          --arg type "${dep_type}" \
+          --arg published "${pub_date}" \
+          --argjson age_hours "${age_hrs}" \
+          '{package: $package, type: $type, published: $published, age_hours: $age_hours}')
+        flagged_packages_json="${flagged_packages_json}${pkg_obj}"
+      done <<< "${flagged}"
+    fi
+    flagged_packages_json="${flagged_packages_json}]"
+
+    # Build project object
+    local project_obj
+    project_obj=$(jq -n \
+      --arg name "${project_name}" \
+      --arg path "${project_path}" \
+      --argjson total_packages "${total_pkgs}" \
+      --argjson flagged_count "${flagged_count}" \
+      --argjson flagged_packages "${flagged_packages_json}" \
+      '{name: $name, path: $path, total_packages: $total_packages, flagged_count: $flagged_count, flagged_packages: $flagged_packages}')
+
+    projects_json="${projects_json}${project_obj}"
+  done
+  projects_json="${projects_json}]"
+
+  # Calculate cache statistics
+  local total_queries=$((cache_hits + cache_misses))
+  local cache_hit_rate=0
+  if [[ "${total_queries}" -gt 0 ]]; then
+    cache_hit_rate=$((cache_hits * 100 / total_queries))
+  fi
+
+  # Build complete JSON structure (monochrome for automation compatibility)
+  jq -M -n \
+    --argjson scan_timestamp "${current_timestamp}" \
+    --argjson threshold_hours "${age_threshold_hours}" \
+    --arg search_dir "${abs_search_dir}" \
+    --argjson total_projects "${total_projects}" \
+    --argjson projects_with_issues "${projects_with_issues}" \
+    --argjson total_flagged "${total_flagged}" \
+    --argjson cache_hits "${cache_hits}" \
+    --argjson cache_misses "${cache_misses}" \
+    --argjson cache_hit_rate "${cache_hit_rate}" \
+    --argjson projects "${projects_json}" \
+    '{
+      scan_metadata: {
+        scan_timestamp: $scan_timestamp,
+        threshold_hours: $threshold_hours,
+        search_directory: $search_dir
+      },
+      summary: {
+        total_projects: $total_projects,
+        projects_with_issues: $projects_with_issues,
+        total_packages_flagged: $total_flagged
+      },
+      performance: {
+        cache_hits: $cache_hits,
+        cache_misses: $cache_misses,
+        cache_hit_rate_percent: $cache_hit_rate
+      },
+      projects: $projects
+    }'
+}
+
+# ------------------------------------------------------------------------------
 # Display scan header with search parameters
 # ------------------------------------------------------------------------------
 disp_header() {
@@ -736,7 +981,24 @@ disp_summary() {
 # ==============================================================================
 
 main() {
-  # Parse command line arguments
+  # Parse command line arguments for -o flag
+  if [[ "${1:-}" == "-o" ]]; then
+    # Validate output format
+    case "${2:-}" in
+      csv|jsonl|json-array|json-structured)
+        OUTPUT_FORMAT="${2}"
+        shift 2  # Remove -o and format from arguments
+        ;;
+      *)
+        echo "Error: Invalid output format '${2}'. Must be: csv, jsonl, json-array, or json-structured" >&2
+        echo "" >&2
+        usage >&2
+        exit "${ERR_CONFIG}"
+        ;;
+    esac
+  fi
+
+  # Parse remaining positional arguments
   search_dir="${1:-.}"
   age_threshold_hours="${2:-24}"
 
@@ -779,7 +1041,28 @@ main() {
   # Scan all projects
   scan_projects
 
-  if [[ "${HEADLESS}" != "true" ]]; then
+  # Output results based on mode and format
+  if [[ "${HEADLESS}" == "true" ]]; then
+    # Headless mode: output in specified format (CSV or JSON variants)
+    case "${OUTPUT_FORMAT}" in
+      csv)
+        output_csv
+        ;;
+      jsonl)
+        output_jsonl
+        ;;
+      json-array)
+        output_json_array
+        ;;
+      json-structured)
+        output_json_structured
+        ;;
+      *)
+        error "${ERR_CONFIG}" "Unknown output format: ${OUTPUT_FORMAT}"
+        ;;
+    esac
+  else
+    # Interactive mode: human-readable summary
     disp_summary
   fi
 
