@@ -17,7 +17,7 @@ This scanner helps identify recently published packages in installed npm package
 - **Direct vs nested dependency tracking** - Shows if packages are direct dependencies or transitive
 - **Performance optimized** - Caches npm registry queries across projects (YMMV in terms of performance gains)
 - **Security-focused** - Validates inputs, prevents path traversal attacks
-- **Flexible output** - Human-readable summary or CSV format for automation
+- **Flexible output** - Human-readable summary, CSV, JSONL, JSON array, or structured JSON with metadata
 - **Debug support** - Multiple debug levels for troubleshooting
 
 ## Requirements
@@ -58,7 +58,7 @@ sudo yum install jq
 ### Basic Usage
 
 ```bash
-# Scan current directory with 24-hour threshold
+# Scan current directory with 24-hour threshold (CSV output)
 ./bash-scan-npm-projects.sh
 
 # Scan specific directory
@@ -66,6 +66,11 @@ sudo yum install jq
 
 # Custom time threshold (in hours)
 ./bash-scan-npm-projects.sh ~/projects 48
+
+# Specify output format (CSV or JSON variants)
+./bash-scan-npm-projects.sh -o jsonl ~/projects 24
+./bash-scan-npm-projects.sh -o json-array ~/projects 24
+./bash-scan-npm-projects.sh -o json-structured ~/projects 24
 ```
 
 ### Risk Appetite Guidelines
@@ -81,7 +86,12 @@ Choose a threshold based on your security posture:
 
 ### Output Modes
 
-**Human-readable (default when HEADLESS=false):**
+The scanner supports multiple output formats for different use cases.
+
+#### Human-readable Summary (HEADLESS=false)
+
+Best for manual review and understanding project health.
+
 ```bash
 HEADLESS=false ./bash-scan-npm-projects.sh ~/projects 24
 ```
@@ -109,15 +119,117 @@ Final Summary:
   Age threshold:            24 hours
 ```
 
-**CSV format (default when HEADLESS=true):**
+#### CSV Format (default when HEADLESS=true)
+
+Best for spreadsheet analysis and simple automation.
+
 ```bash
-HEADLESS=true ./bash-scan-npm-projects.sh ~/projects 24 > results.csv
+./bash-scan-npm-projects.sh ~/projects 24 > results.csv
+# or explicitly:
+./bash-scan-npm-projects.sh -o csv ~/projects 24 > results.csv
 ```
 
 Output:
 ```csv
-/path/to/package-lock.json,express@4.18.2,[DIRECT],2026-03-21T10:30:00Z,18
-/path/to/package-lock.json,lodash@4.17.21,[nested],2026-03-20T14:15:00Z,32
+/path/to/package-lock.json,my-app,express@4.18.2,[DIRECT],2026-03-21T10:30:00Z,18
+/path/to/package-lock.json,my-app,lodash@4.17.21,[nested],2026-03-20T14:15:00Z,32
+```
+
+Columns: `lockfile_path,project_name,package@version,type,publish_date,age_hours`
+
+#### JSONL Format (JSON Lines)
+
+Best for streaming processing and line-by-line parsing.
+
+```bash
+./bash-scan-npm-projects.sh -o jsonl ~/projects 24 > results.jsonl
+```
+
+Output (one JSON object per line):
+```json
+{"lockfile":"/path/to/package-lock.json","project":"my-app","package":"express@4.18.2","type":"[DIRECT]","published":"2026-03-21T10:30:00Z","age_hours":18}
+{"lockfile":"/path/to/package-lock.json","project":"my-app","package":"lodash@4.17.21","type":"[nested]","published":"2026-03-20T14:15:00Z","age_hours":32}
+```
+
+#### JSON Array Format
+
+Best for processing entire result set as a single JSON array.
+
+```bash
+./bash-scan-npm-projects.sh -o json-array ~/projects 24 > results.json
+```
+
+Output:
+```json
+[
+  {
+    "lockfile": "/path/to/package-lock.json",
+    "project": "my-app",
+    "package": "express@4.18.2",
+    "type": "[DIRECT]",
+    "published": "2026-03-21T10:30:00Z",
+    "age_hours": 18
+  },
+  {
+    "lockfile": "/path/to/package-lock.json",
+    "project": "my-app",
+    "package": "lodash@4.17.21",
+    "type": "[nested]",
+    "published": "2026-03-20T14:15:00Z",
+    "age_hours": 32
+  }
+]
+```
+
+#### Structured JSON Format
+
+Best for comprehensive analysis with metadata and statistics.
+
+```bash
+./bash-scan-npm-projects.sh -o json-structured ~/projects 24 > results.json
+```
+
+Output:
+```json
+{
+  "scan_metadata": {
+    "scan_timestamp": 1711095845,
+    "threshold_hours": 24,
+    "search_directory": "/home/user/projects"
+  },
+  "summary": {
+    "total_projects": 3,
+    "projects_with_issues": 1,
+    "total_packages_flagged": 2
+  },
+  "performance": {
+    "cache_hits": 45,
+    "cache_misses": 203,
+    "cache_hit_rate_percent": 18
+  },
+  "projects": [
+    {
+      "name": "my-app",
+      "path": "/home/user/projects/my-app",
+      "total_packages": 247,
+      "flagged_count": 2,
+      "flagged_packages": [
+        {
+          "package": "express@4.18.2",
+          "type": "[DIRECT]",
+          "published": "2026-03-21T10:30:00Z",
+          "age_hours": 18
+        },
+        {
+          "package": "lodash@4.17.21",
+          "type": "[nested]",
+          "published": "2026-03-20T14:15:00Z",
+          "age_hours": 32
+        }
+      ]
+    }
+  ]
+}
 ```
 
 ### Debug Mode
@@ -150,19 +262,31 @@ DEBUG=3 ./bash-scan-npm-projects.sh ~/projects 24 2>debug.log
 ### CSV Columns
 
 ```
-path,package@version,type,publish_date,age_hours
+lockfile_path,project_name,package@version,type,publish_date,age_hours
 ```
 
 Example:
 ```csv
-/app/package-lock.json,axios@1.6.7,[DIRECT],2026-03-22T08:45:00Z,6
+/app/package-lock.json,my-app,axios@1.6.7,[DIRECT],2026-03-22T08:45:00Z,6
 ```
+
+### JSON Fields
+
+All JSON formats include these fields for each flagged package:
+
+- **lockfile**: Absolute path to package-lock.json
+- **project**: Project name (from package-lock.json or directory name)
+- **package**: Package name and version (e.g., "express@4.18.2")
+- **type**: "[DIRECT]" or "[nested]" dependency
+- **published**: ISO 8601 timestamp when package version was published
+- **age_hours**: Hours since publication
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HEADLESS` | `true` | Set to `false` for human-readable output |
+| `OUTPUT_FORMAT` | `csv` | Output format when HEADLESS=true: `csv`, `jsonl`, `json-array`, or `json-structured` (can also use `-o` flag) |
 | `DEBUG` | `0` | Debug level: `0` (off), `1` (basic), `2` (verbose), `3` (very verbose) |
 
 ## Examples
@@ -173,7 +297,8 @@ Example:
 #!/bin/bash
 # Run in CI pipeline to check for suspicious packages
 
-HEADLESS=true ./bash-scan-npm-projects.sh /workspace 24 > scan-results.csv
+# CSV output for simple parsing
+./bash-scan-npm-projects.sh -o csv /workspace 24 > scan-results.csv
 
 if [ -s scan-results.csv ]; then
   echo "WARNING: Recently published packages detected!"
@@ -182,7 +307,38 @@ if [ -s scan-results.csv ]; then
 fi
 ```
 
-### Example 2: Weekly Audit with Email Report
+### Example 2: Structured JSON for Monitoring Dashboard
+
+```bash
+#!/bin/bash
+# Generate structured JSON for dashboard integration
+
+./bash-scan-npm-projects.sh -o json-structured ~/projects 24 > scan-results.json
+
+# POST to monitoring API
+curl -X POST https://monitoring.company.com/api/npm-scan \
+  -H "Content-Type: application/json" \
+  -d @scan-results.json
+```
+
+### Example 3: JSONL for Stream Processing
+
+```bash
+#!/bin/bash
+# Process each flagged package individually
+
+./bash-scan-npm-projects.sh -o jsonl ~/projects 24 | while read -r line; do
+  # Each line is a complete JSON object
+  package=$(echo "$line" | jq -r '.package')
+  age=$(echo "$line" | jq -r '.age_hours')
+
+  if [ "$age" -lt 12 ]; then
+    echo "CRITICAL: $package published in last 12 hours!"
+  fi
+done
+```
+
+### Example 4: Weekly Audit with Email Report
 
 ```bash
 #!/bin/bash
@@ -195,7 +351,7 @@ if grep -q "WARN:" weekly-report.txt; then
 fi
 ```
 
-### Example 3: Pre-deployment Check
+### Example 5: Pre-deployment Check
 
 ```bash
 #!/bin/bash
