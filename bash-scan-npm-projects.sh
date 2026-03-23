@@ -65,6 +65,10 @@ readonly HEADLESS
 # - json-array: Single JSON array of all flagged packages
 # - json-structured: Structured JSON with metadata and per-project breakdown
 OUTPUT_FORMAT="${OUTPUT_FORMAT:-csv}"
+OUTPUT_FORMAT="$(echo "${OUTPUT_FORMAT}" | tr '[:upper:]' '[:lower:]')"  # Convert to lowercase for case-insensitive handling
+
+# Valid output formats (used for validation)
+readonly VALID_OUTPUT_FORMATS=("csv" "jsonl" "json-array" "json-structured")
 
 # Time constants
 readonly SECONDS_PER_HOUR=3600
@@ -172,12 +176,15 @@ EOF
 # ------------------------------------------------------------------------------
 # Validate bash version meets minimum requirement
 # Usage: validate_bash_version
-# Note: Script requires bash 4.0+ for associative arrays (declare -A)
+# Note: Script requires bash 4.3+ for namerefs (declare -n) used in validate_value()
+#       Also requires bash 4.0+ for associative arrays (declare -A)
 #       This script is designed for Linux systems only
 # ------------------------------------------------------------------------------
 validate_bash_version() {
   local bash_major="${BASH_VERSINFO[0]}"
+  local bash_minor="${BASH_VERSINFO[1]}"
   local min_major=4
+  local min_minor=3
 
   # Check if BASH_VERSINFO is available (empty if not running in bash)
   if [[ -z "${bash_major}" ]]; then
@@ -189,9 +196,10 @@ validate_bash_version() {
     error "${ERR_DEPENDENCY}" "Invalid bash version format: '${bash_major}'"
   fi
 
-  # Check minimum version requirement
-  if [[ "${bash_major}" -lt "${min_major}" ]]; then
-    error "${ERR_DEPENDENCY}" "Requires bash ${min_major}.0+ for associative arrays (current: ${BASH_VERSION})"
+  # Check minimum version requirement (bash 4.3+)
+  if [[ "${bash_major}" -lt "${min_major}" ]] || \
+     [[ "${bash_major}" -eq "${min_major}" && "${bash_minor}" -lt "${min_minor}" ]]; then
+    error "${ERR_DEPENDENCY}" "Requires bash ${min_major}.${min_minor}+ for namerefs (current: ${BASH_VERSION})"
   fi
 
   debug "${DEBUG_LEVEL_1}" "${FUNCNAME[0]}:$LINENO" "Bash version ${BASH_VERSION} OK"
@@ -215,6 +223,31 @@ validate_tools() {
   fi
 
   debug "${DEBUG_LEVEL_1}" "${FUNCNAME[0]}:$LINENO" "All required tools present"
+}
+
+# ------------------------------------------------------------------------------
+# Validate value against list of valid options
+# Usage: validate_value <value> <valid_list_array_name> <result_var_name>
+# Example:
+#   local is_valid
+#   validate_value "${user_input}" VALID_OUTPUT_FORMATS is_valid
+#   if ! ${is_valid}; then echo "Invalid"; fi
+# ------------------------------------------------------------------------------
+validate_value() {
+  local value="${1}"
+  declare -n valid_value_list_ref="${2}"
+  declare -n valid_value_flag_ref="${3}"
+
+  valid_value_flag_ref=false
+
+  for item in "${valid_value_list_ref[@]}"; do
+    if [[ "${value}" == "${item}" ]]; then
+      valid_value_flag_ref=true
+      break
+    fi
+  done
+
+  debug "${DEBUG_LEVEL_2}" "${FUNCNAME[0]}:$LINENO" "Validated: ${value} -> ${valid_value_flag_ref}"
 }
 
 # ------------------------------------------------------------------------------
@@ -983,19 +1016,20 @@ disp_summary() {
 main() {
   # Parse command line arguments for -o flag
   if [[ "${1:-}" == "-o" ]]; then
-    # Validate output format
-    case "${2:-}" in
-      csv|jsonl|json-array|json-structured)
-        OUTPUT_FORMAT="${2}"
-        shift 2  # Remove -o and format from arguments
-        ;;
-      *)
-        echo "Error: Invalid output format '${2}'. Must be: csv, jsonl, json-array, or json-structured" >&2
-        echo "" >&2
-        usage >&2
-        exit "${ERR_CONFIG}"
-        ;;
-    esac
+    # Convert to lowercase for case-insensitive comparison (POSIX-compliant approach)
+    local format="${2:-}"
+    format="$(echo "${format}" | tr '[:upper:]' '[:lower:]')"
+
+    # Validate output format using validate_value function
+    local is_valid_format
+    validate_value "${format}" VALID_OUTPUT_FORMATS is_valid_format
+
+    if ${is_valid_format}; then
+      OUTPUT_FORMAT="${format}"
+      shift 2  # Remove -o and format from arguments
+    else
+      error "${ERR_CONFIG}" "Invalid output format '${2}'. Must be one of: ${VALID_OUTPUT_FORMATS[*]} (case-insensitive)"
+    fi
   fi
 
   # Parse remaining positional arguments
@@ -1007,12 +1041,19 @@ main() {
 
   debug "${DEBUG_LEVEL_1}" "${FUNCNAME[0]}:$LINENO" "Starting ${SCRIPT_NAME}"
 
+  # Validate OUTPUT_FORMAT early (in case it was set via environment variable)
+  local is_valid_output_format
+  validate_value "${OUTPUT_FORMAT}" VALID_OUTPUT_FORMATS is_valid_output_format
+
+  if ! ${is_valid_output_format}; then
+    error "${ERR_CONFIG}" "Invalid OUTPUT_FORMAT environment variable '${OUTPUT_FORMAT}'. Must be one of: ${VALID_OUTPUT_FORMATS[*]}"
+  fi
+
+  debug "${DEBUG_LEVEL_1}" "${FUNCNAME[0]}:$LINENO" "Output format: ${OUTPUT_FORMAT}"
+
   # Validate search directory exists
   if [[ ! -d "${search_dir}" ]]; then
-    echo "Error: Directory '${search_dir}' does not exist" >&2
-    echo "" >&2
-    usage >&2
-    exit "${ERR_CONFIG}"
+    error "${ERR_CONFIG}" "Directory '${search_dir}' does not exist"
   fi
 
   # Convert search_dir to absolute path so find command will return absolute paths
@@ -1020,10 +1061,7 @@ main() {
 
   # Validate that age threshold is a positive integer
   if ! [[ "${age_threshold_hours}" =~ ^[0-9]+$ ]]; then
-    echo "Error: Age threshold must be a positive integer (hours)" >&2
-    echo "" >&2
-    usage >&2
-    exit "${ERR_CONFIG}"
+    error "${ERR_CONFIG}" "Age threshold must be a positive integer (hours)"
   fi
 
   # Validate maximum value (prevent integer overflow)
@@ -1043,24 +1081,16 @@ main() {
 
   # Output results based on mode and format
   if [[ "${HEADLESS}" == "true" ]]; then
-    # Headless mode: output in specified format (CSV or JSON variants)
-    case "${OUTPUT_FORMAT}" in
-      csv)
-        output_csv
-        ;;
-      jsonl)
-        output_jsonl
-        ;;
-      json-array)
-        output_json_array
-        ;;
-      json-structured)
-        output_json_structured
-        ;;
-      *)
-        error "${ERR_CONFIG}" "Unknown output format: ${OUTPUT_FORMAT}"
-        ;;
-    esac
+    # Using associative arrays to reduce the use of nested/convoluted if-else statements or case statements
+    declare -A output_function
+    output_function["csv"]="output_csv"
+    output_function["jsonl"]="output_jsonl"
+    output_function["json-array"]="output_json_array"
+    output_function["json-structured"]="output_json_structured"
+
+    # Lookup and call the output function (validation already done early, so this should always succeed)
+    local func_name="${output_function[${OUTPUT_FORMAT}]}"
+    "${func_name}"
   else
     # Interactive mode: human-readable summary
     disp_summary
