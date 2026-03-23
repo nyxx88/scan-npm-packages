@@ -1,4 +1,4 @@
-# NPM Package Age Scanner
+# NPM Installed Package Age Scanner
 
 A bash-based tool that scans all npm projects in a directory tree for recently published packages, helping detect potential supply chain attacks and suspicious package updates. Its purpose is not to replicate what other NPM vulnerability scanning tools already do well. Instead, it gives visibility into 'freshly' published NPM packages that have been installed in a given environment.
 
