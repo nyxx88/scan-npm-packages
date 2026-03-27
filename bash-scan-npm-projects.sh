@@ -83,6 +83,10 @@ readonly DIRECT_DEPENDENCY=1   # Marker for direct dependencies in associative a
 # Required external tools
 readonly REQUIRED_TOOLS=("jq" "npm" "date" "find" "basename" "dirname")
 
+# Default values
+readonly DEFAULT_DIRECTORY="."
+readonly DEFAULT_AGE_THRESHOLD_HOURS=24
+
 # ==============================================================================
 # Global State Variables
 # ==============================================================================
@@ -438,12 +442,15 @@ scan_project_packages() {
 
   # Extract all installed packages from package-lock.json
   # This includes direct dependencies AND nested dependencies (transitive deps)
-  while IFS='@' read -r pkg version; do
+  # Note: Using '|' as delimiter instead of '@' because scoped packages like @esbuild/aix-ppc64
+  # contain '@' in their name. Using '@' as delimiter would incorrectly split @esbuild/aix-ppc64@0.27.3
+  # into pkg='' version='esbuild/aix-ppc64@0.27.3' instead of pkg='@esbuild/aix-ppc64' version='0.27.3'
+  while IFS='|' read -r pkg version; do
     ((project_package_count += 1))
-    # IFS='@' sets the Input Field Separator to '@'
-    # This splits "express@4.18.2" into:
-    #   pkg = "express"
-    #   version = "4.18.2"
+    # IFS='|' sets the Input Field Separator to '|'
+    # This splits "@esbuild/aix-ppc64|0.27.3" into:
+    #   pkg = "@esbuild/aix-ppc64"
+    #   version = "0.27.3"
 
     debug "${DEBUG_LEVEL_3}" "${FUNCNAME[0]}:$LINENO" "Processing ${pkg}@${version}"
 
@@ -522,7 +529,7 @@ scan_project_packages() {
     fi
 
   done < <(jq -r '.packages | to_entries[] | select(.key != "") |
-                  (.key | sub("'"${NODE_MODULES_PREFIX}"'"; "")) + "@" + .value.version' "${lockfile_path}" 2>/dev/null)
+                  (.key | sub("'"${NODE_MODULES_PREFIX}"'"; "")) + "|" + .value.version' "${lockfile_path}" 2>/dev/null)
 
   debug "${DEBUG_LEVEL_1}" "${FUNCNAME[0]}:$LINENO" "Found ${package_flagged_count} packages within threshold"
 
@@ -770,6 +777,7 @@ output_json_array() {
   echo "["
 
   # Define inline callback for array items
+  # shellcheck disable=SC2329
   _json_array_callback() {
     local proj_idx="${1}"
     local pkg_version="${2}"
@@ -1033,8 +1041,8 @@ main() {
   fi
 
   # Parse remaining positional arguments
-  search_dir="${1:-.}"
-  age_threshold_hours="${2:-24}"
+  search_dir="${1:-$DEFAULT_DIRECTORY}"                                                            # If $1 is empty or unset, use $DEFAULT_DIRECTORY
+  age_threshold_hours="${2:-$DEFAULT_AGE_THRESHOLD_HOURS}"                                         # If $2 is empty or unset, use $DEFAULT_AGE_THRESHOLD_HOURS
 
   # Setup trap for cleanup
   trap cleanup EXIT INT TERM
