@@ -32,12 +32,10 @@ typeset -A direct_deps_map
 typeset -A npm_cache
 total_projects=0
 total_flagged=0
-projects_with_issues=0
 cache_hits=0
 cache_misses=0
 typeset -a project_names
 typeset -a project_paths
-typeset -a project_total_packages
 typeset -a project_flagged_packages
 
 # Error handler - outputs to stdout for remote execution compatibility
@@ -146,12 +144,6 @@ scan_project_packages() {
   local project_package_count=0
   local flagged_list=""
 
-  # Declare loop variables outside the loop to avoid zsh bug where
-  # re-declaring 'local' variables inside a loop prints previous values to stdout
-  local pkg version
-  local is_direct cache_key publish_date
-  local pkg_timestamp age_hours flagged_entry
-
   debug "${DEBUG_LEVEL_1}" "${funcstack[1]}:$LINENO" "Scanning packages in ${lockfile_path}"
 
   # Note: Using '|' as delimiter instead of '@' because scoped packages like @esbuild/aix-ppc64
@@ -166,13 +158,15 @@ scan_project_packages() {
       continue
     fi
 
+    local is_direct
     if [[ -n "${direct_deps_map[${pkg}]:-}" ]]; then
       is_direct="[DIRECT]"
     else
       is_direct="[nested]"
     fi
 
-    cache_key="${pkg}@${version}"
+    local cache_key="${pkg}@${version}"
+    local publish_date
 
     if [[ -n "${npm_cache[${cache_key}]:-}" ]]; then
       publish_date="${npm_cache[${cache_key}]}"
@@ -189,13 +183,15 @@ scan_project_packages() {
     fi
 
     if [[ -n "${publish_date}" ]] && [[ "${publish_date}" != "null" ]]; then
+      local pkg_timestamp
       pkg_timestamp=$(convert_iso_to_timestamp "${publish_date}") || continue
+      local age_hours
       age_hours=$(( (current_timestamp - pkg_timestamp) / SECONDS_PER_HOUR ))
       debug "${DEBUG_LEVEL_3}" "${funcstack[1]}:$LINENO" "${lockfile_path}:${pkg}@${version} published: ${publish_date} age: ${age_hours} hours"
 
       if [[ "${age_hours}" -lt "${age_threshold_hours}" ]]; then
         ((package_flagged_count += 1))
-        flagged_entry="${pkg}@${version}|${is_direct}|${publish_date}|${age_hours}"
+        local flagged_entry="${pkg}@${version}|${is_direct}|${publish_date}|${age_hours}"
         if [[ -z "${flagged_list}" ]]; then
           flagged_list="${flagged_entry}"
         else
@@ -207,7 +203,6 @@ scan_project_packages() {
                   (.key | sub("'"${NODE_MODULES_PREFIX}"'"; "")) + "|" + .value.version' "${lockfile_path}" 2>/dev/null)
 
   debug "${DEBUG_LEVEL_1}" "${funcstack[1]}:$LINENO" "Found ${package_flagged_count} packages within threshold"
-  project_total_packages[project_index]="${project_package_count}"
   project_flagged_packages[project_index]="${flagged_list}"
 
   if [[ "${package_flagged_count}" -gt 0 ]]; then
@@ -233,7 +228,6 @@ get_project_name() {
 scan_projects() {
   total_projects=0
   total_flagged=0
-  projects_with_issues=0
   cache_hits=0
   cache_misses=0
 
@@ -280,7 +274,6 @@ scan_projects() {
         package_flagged_count=0
       fi
       debug "${DEBUG_LEVEL_1}" "${funcstack[1]}:$LINENO" "Found ${package_flagged_count} recent package(s) in ${abs_project_dir}"
-      ((projects_with_issues += 1))
       ((total_flagged += package_flagged_count))
     else
       debug "${DEBUG_LEVEL_1}" "${funcstack[1]}:$LINENO" "No recent packages found in ${abs_project_dir}"
@@ -301,12 +294,12 @@ output_csv() {
   debug "${DEBUG_LEVEL_1}" "${funcstack[1]}:$LINENO" "Outputting CSV format"
 
   if [[ "${total_flagged}" -eq 0 ]]; then
-    echo "No data"
+    echo "No data,No data,No data,No data,No data,No data"
     return 0
   fi
 
-  # zsh: use C-style for loop for variable range
-  for ((i=1; i<=total_projects; i++)); do
+  # zsh range: {1..N} (bash would be {0..N-1})
+  for i in {1..$total_projects}; do
     local flagged="${project_flagged_packages[i]}"
     if [[ -z "${flagged}" ]]; then
       continue

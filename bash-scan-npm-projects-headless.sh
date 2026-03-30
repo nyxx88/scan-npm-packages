@@ -30,12 +30,10 @@ declare -A direct_deps_map
 declare -A npm_cache
 total_projects=0
 total_flagged=0
-projects_with_issues=0
 cache_hits=0
 cache_misses=0
 declare -a project_names=()
 declare -a project_paths=()
-declare -a project_total_packages=()
 declare -a project_flagged_packages=()
 
 # Error handler - outputs to stdout for remote execution compatibility
@@ -198,7 +196,6 @@ scan_project_packages() {
                   (.key | sub("'"${NODE_MODULES_PREFIX}"'"; "")) + "|" + .value.version' "${lockfile_path}" 2>/dev/null)
 
   debug "${DEBUG_LEVEL_1}" "${FUNCNAME[0]}:$LINENO" "Found ${package_flagged_count} packages within threshold"
-  project_total_packages[project_index]="${project_package_count}"
   project_flagged_packages[project_index]="${flagged_list}"
 
   if [[ "${package_flagged_count}" -gt 0 ]]; then
@@ -223,7 +220,6 @@ get_project_name() {
 scan_projects() {
   total_projects=0
   total_flagged=0
-  projects_with_issues=0
   cache_hits=0
   cache_misses=0
 
@@ -269,7 +265,6 @@ scan_projects() {
         package_flagged_count=0
       fi
       debug "${DEBUG_LEVEL_1}" "${FUNCNAME[0]}:$LINENO" "Found ${package_flagged_count} recent package(s) in ${abs_project_dir}"
-      ((projects_with_issues += 1))
       ((total_flagged += package_flagged_count))
     else
       debug "${DEBUG_LEVEL_1}" "${FUNCNAME[0]}:$LINENO" "No recent packages found in ${abs_project_dir}"
@@ -290,7 +285,7 @@ output_csv() {
   debug "${DEBUG_LEVEL_1}" "${FUNCNAME[0]}:$LINENO" "Outputting CSV format"
 
   if [[ "${total_flagged}" -eq 0 ]]; then
-    echo "No data"
+    echo "No data,No data,No data,No data,No data,No data"
     return 0
   fi
 
